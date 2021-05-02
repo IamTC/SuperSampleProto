@@ -3,7 +3,6 @@ from OpenGL.GL import *
 from OpenGL.GL.shaders import compileProgram, compileShader
 import numpy as np
 import pyrr
-from pygame import *
 from PIL import Image
 import tensorflow as tf
 from tensorflow import keras
@@ -13,8 +12,15 @@ import PIL.Image
 import time
 import glob
 from functools import cmp_to_key
+import rsslib
+import binascii
+import pygame
 
-model_path = "model/model_SeparableConv.h5"
+import os
+import io
+
+from array import array
+
 
 vertex_src = """
 # version 330
@@ -54,75 +60,14 @@ def window_resize(window, width, height):
     glViewport(0, 0, width, height)
 
 
-def upscale_image(model, img):
-    """Predict the result based on input image and restore the image as RGB."""
-    ycbcr = img.convert("YCbCr")
-    y, cb, cr = ycbcr.split()
-    y = img_to_array(y)
-    y = y.astype("float32") / 255.0
-
-    input = np.expand_dims(y, axis=0)
-    t0 = time.perf_counter()
-    out = model.predict(input)
-    t1 = time.perf_counter()
-    print("Upscale time", t1-t0)
-
-    out_img_y = out[0]
-    out_img_y *= 255.0
-
-    # Restore the image in RGB color space.
-    out_img_y = out_img_y.clip(0, 255)
-    out_img_y = out_img_y.reshape(
-        (np.shape(out_img_y)[0], np.shape(out_img_y)[1]))
-    out_img_y = PIL.Image.fromarray(np.uint8(out_img_y), mode="L")
-    out_img_cb = cb.resize(out_img_y.size, PIL.Image.NEAREST)
-    out_img_cr = cr.resize(out_img_y.size, PIL.Image.NEAREST)
-    out_img = PIL.Image.merge("YCbCr", (out_img_y, out_img_cb, out_img_cr)).convert(
-        "RGB"
-    )
-    return out_img
-
-
-def upscale_image_rgb(model, img):
-    """Predict the result based on input image and restore the image as RGB."""
-    # ycbcr = img.convert("YCbCr")
-    # y, cb, cr = ycbcr.split()
-    y = img_to_array(img)
-    y = y.astype("float32") / 255.0
-
-    input = np.expand_dims(y, axis=0)
-    out = model.predict(input)
-
-    out_img_y = out[0]
-    out_img_y *= 255.0
-    out_img_y = np.uint8(out_img_y)
-    out_img_y = Image.fromarray(out_img_y)
-
-    # Restore the image in RGB color space.
-    # out_img_y = out_img_y.clip(0, 255)
-    # out_img_y = out_img_y.reshape((np.shape(out_img_y)[0], np.shape(out_img_y)[1]))
-    # out_img_y = PIL.Image.fromarray(np.uint8(out_img_y), mode="L")
-    # out_img_cb = cb.resize(out_img_y.size, PIL.Image.BICUBIC)
-    # out_img_cr = cr.resize(out_img_y.size, PIL.Image.BICUBIC)
-
-    return out_img_y
-
-
-def get_lowres_image(img):
-    """Return low-resolution image to use as model input."""
-    return img.resize(
-        (img.size[0] // 3, img.size[1] // 3),
-        PIL.Image.BICUBIC,
-    )
-
-
 # initializing glfw library
 if not glfw.init():
     raise Exception("glfw can not be initialized!")
 
 # creating the window
 glfw.window_hint(glfw.DOUBLEBUFFER, GL_FALSE)
-window = glfw.create_window(1280, 720, "Realtime Supersampling Demo", None, None)
+window = glfw.create_window(
+    1280, 900, "Realtime Supersampling Demo", None, None)
 
 # check if window was created
 if not window:
@@ -138,35 +83,37 @@ glfw.set_window_size_callback(window, window_resize)
 # make the context current
 glfw.make_context_current(window)
 
-vertices = [-0.5, -0.5,  0.5,  1.0, 0.0, 0.0,  0.0, 0.0,
-            0.5, -0.5,  0.5,  0.0, 1.0, 0.0,  1.0, 0.0,
-            0.5,  0.5,  0.5,  0.0, 0.0, 1.0,  1.0, 1.0,
-            -0.5,  0.5,  0.5,  1.0, 1.0, 1.0,  0.0, 1.0,
+vertices = [
+    -1, -1,  0.5,  1.0, 0.0, 0.0,  0.0, 0.0,
+    1, -1,  0.5,  0.0, 1.0, 0.0,  1.0, 0.0,
+    1,  1,  0.5,  0.0, 0.0, 1.0,  1.0, 1.0,
+    -1,  1,  0.5,  1.0, 1.0, 1.0,  0.0, 1.0,
 
-            -0.5, -0.5, -0.5,  1.0, 0.0, 0.0,  0.0, 0.0,
-            0.5, -0.5, -0.5,  0.0, 1.0, 0.0,  1.0, 0.0,
-            0.5,  0.5, -0.5,  0.0, 0.0, 1.0,  1.0, 1.0,
-            -0.5,  0.5, -0.5,  1.0, 1.0, 1.0,  0.0, 1.0,
+    -1, -1, -0.5,  1.0, 0.0, 0.0,  0.0, 0.0,
+    1, -1, -0.5,  0.0, 1.0, 0.0,  1.0, 0.0,
+    1,  1, -0.5,  0.0, 0.0, 1.0,  1.0, 1.0,
+    -1,  1, -0.5,  1.0, 1.0, 1.0,  0.0, 1.0,
 
-            0.5, -0.5, -0.5,  1.0, 0.0, 0.0,  0.0, 0.0,
-            0.5,  0.5, -0.5,  0.0, 1.0, 0.0,  1.0, 0.0,
-            0.5,  0.5,  0.5,  0.0, 0.0, 1.0,  1.0, 1.0,
-            0.5, -0.5,  0.5,  1.0, 1.0, 1.0,  0.0, 1.0,
+    1, -1, -0.5,  1.0, 0.0, 0.0,  0.0, 0.0,
+    1,  1, -0.5,  0.0, 1.0, 0.0,  1.0, 0.0,
+    1,  1,  0.5,  0.0, 0.0, 1.0,  1.0, 1.0,
+    1, -1,  0.5,  1.0, 1.0, 1.0,  0.0, 1.0,
 
-            -0.5,  0.5, -0.5,  1.0, 0.0, 0.0,  0.0, 0.0,
-            -0.5, -0.5, -0.5,  0.0, 1.0, 0.0,  1.0, 0.0,
-            -0.5, -0.5,  0.5,  0.0, 0.0, 1.0,  1.0, 1.0,
-            -0.5,  0.5,  0.5,  1.0, 1.0, 1.0,  0.0, 1.0,
+    -1, 1, -0.5,  1.0, 0.0, 0.0,  0.0, 0.0,
+    -1, -1, -0.5,  0.0, 1.0, 0.0,  1.0, 0.0,
+    -1, -1,  0.5,  0.0, 0.0, 1.0,  1.0, 1.0,
+    -1,  1,  0.5,  1.0, 1.0, 1.0,  0.0, 1.0,
 
-            -0.5, -0.5, -0.5,  1.0, 0.0, 0.0,  0.0, 0.0,
-            0.5, -0.5, -0.5,  0.0, 1.0, 0.0,  1.0, 0.0,
-            0.5, -0.5,  0.5,  0.0, 0.0, 1.0,  1.0, 1.0,
-            -0.5, -0.5,  0.5,  1.0, 1.0, 1.0,  0.0, 1.0,
+    -1, -1, -0.5,  1.0, 0.0, 0.0,  0.0, 0.0,
+    1, -1, -0.5,  0.0, 1.0, 0.0,  1.0, 0.0,
+    1, -1,  0.5,  0.0, 0.0, 1.0,  1.0, 1.0,
+    -1, -1,  0.5,  1.0, 1.0, 1.0,  0.0, 1.0,
 
-            0.5,  0.5, -0.5,  1.0, 0.0, 0.0,  0.0, 0.0,
-            -0.5,  0.5, -0.5,  0.0, 1.0, 0.0,  1.0, 0.0,
-            -0.5,  0.5,  0.5,  0.0, 0.0, 1.0,  1.0, 1.0,
-            0.5,  0.5,  0.5,  1.0, 1.0, 1.0,  0.0, 1.0]
+    1,  1, -0.5,  1.0, 0.0, 0.0,  0.0, 0.0,
+    -1,  1, -0.5,  0.0, 1.0, 0.0,  1.0, 0.0,
+    -1, 1,  0.5,  0.0, 0.0, 1.0,  1.0, 1.0,
+    1,  1,  0.5,  1.0, 1.0, 1.0,  0.0, 1.0
+]
 
 indices = [0,  1,  2,  2,  3,  0,
            4,  5,  6,  6,  7,  4,
@@ -181,7 +128,7 @@ indices = np.array(indices, dtype=np.uint32)
 shader = compileProgram(compileShader(
     vertex_src, GL_VERTEX_SHADER), compileShader(fragment_src, GL_FRAGMENT_SHADER))
 
-# Vertex Buffer Object
+# Vertex Buffer Object for non immediate-mode rendering. 
 VBO = glGenBuffers(1)
 glBindBuffer(GL_ARRAY_BUFFER, VBO)
 glBufferData(GL_ARRAY_BUFFER, vertices.nbytes, vertices, GL_STATIC_DRAW)
@@ -213,9 +160,6 @@ glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT)
 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
 
-new_model = tf.keras.models.load_model(model_path)
-new_model.summary()
-
 
 glUseProgram(shader)
 glClearColor(0, 0.1, 0.1, 1)
@@ -225,12 +169,6 @@ glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
 rotation_loc = glGetUniformLocation(shader, "rotation")
 
-# load image
-image = Image.open("textures/frame (1).png")
-image = image.transpose(Image.FLIP_TOP_BOTTOM)
-# img_data = image.convert("RGBA").tobytes()
-# img_data = np.array(image.getdata(), np.uint8) # second way of getting the raw image data
-
 images = []
 for fname in glob.iglob('textures/*'):
     images.append(Image.open(fname))
@@ -238,11 +176,19 @@ for fname in glob.iglob('textures/*'):
 
 def get_frame_number(frame):
     frame = frame.filename
-    frame = frame.split('(')[1]
+    frame = frame.split('\\')[1]
     frame = frame.split('.')[0]
-    frame = frame.replace(')', '')
 
     return int(frame)
+
+pygame.font.init()
+
+def drawText(position, textString):    
+    font = pygame.font.Font (None, 64)
+    textSurface = font.render(textString, True, (255,255,255,255), (0,0,0,255))     
+    textData = pygame.image.tostring(textSurface, "RGBA", True)     
+    glRasterPos3d(1,1,0)     
+    glDrawPixels(textSurface.get_width(), textSurface.get_height(), GL_RGBA, GL_UNSIGNED_BYTE, textData)
 
 
 images = sorted(images, key=cmp_to_key(
@@ -250,50 +196,38 @@ images = sorted(images, key=cmp_to_key(
 
 target_fps = 20.0
 
+model_path = "./model/model_SeparableConv4x.h5"
+rss = rsslib.RSS(image_size_h=900, image_size_w=1600,
+                 batch_size=8, upscale_factor=4, channels=1)
+rss.load_model(model_path)
+
 # the main application loop
 lastTime = glfw.get_time()
 nbFrames = 0
 frame_idx = 0
-while not glfw.window_should_close(window):
+frame_time = 0
+while not glfw.window_should_close(window): 
     currentTime = glfw.get_time()
     nbFrames += 1
-    # if currentTime - lastTime >= 1.0:
-    #     # If last prinf() was more than 1 sec ago
-    #     # printf and reset timer
-    #     print("%f ms/frame\n" % (1000.0/nbFrames))
-    #     nbFrames = 0
-    #     lastTime += 1.0
-
-    if currentTime - lastTime >= 1/target_fps:
-        # If last prinf() was more than 1 sec ago
-        # printf and reset timer
-        print("%f ms/frame\n" % (1000.0/nbFrames))
-        nbFrames = 0
-        lastTime += 1/target_fps
-        frame_idx += 1
-        if(frame_idx == len(images)):
-            frame_idx = 0
-
-    out = get_lowres_image(images[frame_idx].transpose(Image.FLIP_TOP_BOTTOM))
-    out = upscale_image(new_model, out)
+    out = images[frame_idx].transpose(Image.FLIP_TOP_BOTTOM)
+    t0 =glfw.get_time()
+    out = rss.upscale_image(mode="yuv", image=out)
+    t1 = glfw.get_time()
+    print("Upscale Time: " , (t1-t0) * 1000)
+    image_arr_data = img_to_array(out)
     img_data = out
     img_data = out.convert("RGBA").tobytes()
-    # img_data = np.array(image.getdata(), np.uint8)
+
+    # tf.keras.preprocessing.image.save_img(
+    #     './ResultNoSR/' + str(frame_idx) + '.png', image_arr_data, data_format=None, scale=True
+    # )
 
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, out.width, out.height,
                  0, GL_RGBA, GL_UNSIGNED_BYTE, img_data)
 
-    # tf.keras.preprocessing.image.save_img(
-    #     './Result/out', img_data, data_format=None, file_format='png', scale=True
-    # )
-    # img_data = np.array(image,np.uint8 )
-
     glfw.poll_events()
 
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-
-    # rot_x = pyrr.Matrix44.from_x_rotation(0.5 * glfw.get_time())
-    # rot_y = pyrr.Matrix44.from_y_rotation(0.8 * glfw.get_time())
 
     rot_x = pyrr.Matrix44.from_x_rotation(0)
     rot_y = pyrr.Matrix44.from_y_rotation(0)
@@ -304,7 +238,20 @@ while not glfw.window_should_close(window):
     glDrawElements(GL_TRIANGLES, len(indices), GL_UNSIGNED_INT, None)
 
     # glfw.swap_buffers(window)
+
+    lastTime = glfw.get_time()
+
+    frame_time = (lastTime - currentTime) * 1000
+
+    glDisable(GL_TEXTURE_2D)
+    glEnable(GL_COLOR_MATERIAL)
+
+    if(frame_time >= target_fps):
+        frame_idx += 1
+        # print("Frame Time:", frame_time)        
+        
     glFlush()
+    glFinish()
 
 # terminate glfw, free up allocated resources
 glfw.terminate()
